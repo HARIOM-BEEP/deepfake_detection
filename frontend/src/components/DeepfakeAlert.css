@@ -1,0 +1,54 @@
+.deepfake-alert {
+  background: rgba(239, 68, 68, 0.95);
+  border: 2px solid var(--danger);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-md);
+  display: flex;
+  gap: var(--spacing-md);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(10px);
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.alert-icon {
+  font-size: 2rem;
+  flex-shrink: 0;
+}
+
+.alert-content {
+  flex: 1;
+}
+
+.alert-content h4 {
+  margin: 0 0 var(--spacing-xs) 0;
+  color: white;
+  font-size: 1.1rem;
+}
+
+.alert-content p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.9rem;
+}
+
+.alert-content strong {
+  color: white;
+  font-weight: 600;
+}
+
+.confidence {
+  margin-top: var(--spacing-xs);
+  font-weight: 600;
+  color: white;
+}
