@@ -4,6 +4,7 @@ import { connectSocket, disconnectSocket, getSocket } from '../services/socket';
 import webrtcService from '../services/webrtc';
 import VideoGrid from '../components/VideoGrid';
 import MeetingControls from '../components/MeetingControls';
+import ChatPanel from '../components/ChatPanel';
 import DeepfakeAlert from '../components/DeepfakeAlert';
 import { startFrameAnalysis, stopFrameAnalysis } from '../utils/frameCapture';
 import './MeetingRoom.css';
@@ -15,11 +16,15 @@ function MeetingRoom({ user }) {
   const [participants, setParticipants] = useState([]);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [deepfakeAlerts, setDeepfakeAlerts] = useState([]);
   const [error, setError] = useState('');
+  
   const socketRef = useRef(null);
   const localVideoRef = useRef(null);
   const frameAnalysisRef = useRef(null);
+  const screenTrackRef = useRef(null);
 
   useEffect(() => {
     initializeMeeting();
@@ -56,23 +61,29 @@ function MeetingRoom({ user }) {
       // Socket event listeners
       socket.on('existing-participants', (existingParticipants) => {
         existingParticipants.forEach(participant => {
-          const peer = webrtcService.addPeer(participant.socketId, stream, socket);
-          setParticipants(prev => [...prev, {
-            socketId: participant.socketId,
-            userId: participant.userId,
-            userName: participant.userName,
-            stream: null
-          }]);
+          webrtcService.addPeer(participant.socketId, stream, socket);
+          setParticipants(prev => {
+            if (prev.find(p => p.socketId === participant.socketId)) return prev;
+            return [...prev, {
+              socketId: participant.socketId,
+              userId: participant.userId,
+              userName: participant.userName,
+              stream: null
+            }];
+          });
         });
       });
 
       socket.on('user-joined', ({ socketId, userId, userName }) => {
-        setParticipants(prev => [...prev, {
-          socketId,
-          userId,
-          userName,
-          stream: null
-        }]);
+        setParticipants(prev => {
+          if (prev.find(p => p.socketId === socketId)) return prev;
+          return [...prev, {
+            socketId,
+            userId,
+            userName,
+            stream: null
+          }];
+        });
       });
 
       socket.on('offer', ({ from, offer }) => {
@@ -93,13 +104,18 @@ function MeetingRoom({ user }) {
       });
 
       socket.on('deepfake-detected', ({ userId, confidence, timestamp }) => {
-        const participant = participants.find(p => p.userId === userId);
-        setDeepfakeAlerts(prev => [...prev, {
-          id: Date.now(),
-          userName: participant?.userName || 'Unknown',
-          confidence,
-          timestamp
-        }]);
+        setParticipants(currentParticipants => {
+          const participant = currentParticipants.find(p => p.userId === userId);
+          const userName = userId === user._id ? 'You' : (participant?.userName || 'Unknown');
+          
+          setDeepfakeAlerts(prev => [...prev, {
+            id: Date.now(),
+            userName,
+            confidence,
+            timestamp
+          }]);
+          return currentParticipants;
+        });
 
         // Auto-remove alert after 10 seconds
         setTimeout(() => {
@@ -170,30 +186,85 @@ function MeetingRoom({ user }) {
     }
   };
 
+  const toggleScreenShare = async () => {
+    try {
+      if (!isScreenSharing) {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const screenTrack = screenStream.getVideoTracks()[0];
+        screenTrackRef.current = screenTrack;
+
+        // Replace track for all peers
+        const videoTrack = localStream.getVideoTracks()[0];
+        webrtcService.peers.forEach(peer => {
+          peer.replaceTrack(videoTrack, screenTrack, localStream);
+        });
+
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = screenStream;
+        }
+
+        screenTrack.onended = () => {
+          stopScreenShare();
+        };
+
+        setIsScreenSharing(true);
+        if (socketRef.current) {
+          socketRef.current.emit('start-screen-share', { meetingId });
+        }
+      } else {
+        stopScreenShare();
+      }
+    } catch (err) {
+      console.error('Failed to toggle screen share:', err);
+    }
+  };
+
+  const stopScreenShare = () => {
+    if (screenTrackRef.current && localStream) {
+      const screenTrack = screenTrackRef.current;
+      const videoTrack = localStream.getVideoTracks()[0];
+
+      webrtcService.peers.forEach(peer => {
+        peer.replaceTrack(screenTrack, videoTrack, localStream);
+      });
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = localStream;
+      }
+
+      screenTrack.stop();
+      screenTrackRef.current = null;
+      setIsScreenSharing(false);
+      
+      if (socketRef.current) {
+        socketRef.current.emit('stop-screen-share', { meetingId });
+      }
+    }
+  };
+
   const leaveMeeting = () => {
     cleanup();
     navigate('/dashboard');
   };
 
   const cleanup = () => {
-    // Stop frame analysis
     if (frameAnalysisRef.current) {
       stopFrameAnalysis(frameAnalysisRef.current);
     }
 
-    // Stop local stream
+    if (screenTrackRef.current) {
+      screenTrackRef.current.stop();
+    }
+
     if (localStream) {
       localStream.getTracks().forEach(track => track.stop());
     }
 
-    // Remove event listeners
     window.removeEventListener('peer-stream', handlePeerStream);
     window.removeEventListener('peer-removed', handlePeerRemoved);
 
-    // Clean up WebRTC
     webrtcService.removeAllPeers();
 
-    // Disconnect socket
     if (socketRef.current) {
       socketRef.current.emit('leave-meeting');
       disconnectSocket();
@@ -201,8 +272,9 @@ function MeetingRoom({ user }) {
   };
 
   const copyMeetingId = () => {
-    navigator.clipboard.writeText(meetingId);
-    alert('Meeting ID copied to clipboard!');
+    const url = window.location.href;
+    navigator.clipboard.writeText(url);
+    alert('Meeting link copied to clipboard!');
   };
 
   if (error) {
@@ -220,39 +292,58 @@ function MeetingRoom({ user }) {
   }
 
   return (
-    <div className="meeting-room">
+    <div className={`meeting-room ${isChatOpen ? 'chat-open' : ''}`}>
       <div className="meeting-header">
         <div className="meeting-info">
           <h3>Meeting: {meetingId}</h3>
           <button onClick={copyMeetingId} className="btn-copy">
-            📋 Copy ID
+            📋 Copy Link
           </button>
+        </div>
+        <div className="meeting-stats">
+          <span>{participants.length + 1} Participants</span>
         </div>
       </div>
 
-      {deepfakeAlerts.length > 0 && (
-        <div className="alerts-container">
-          {deepfakeAlerts.map(alert => (
-            <DeepfakeAlert key={alert.id} alert={alert} />
-          ))}
+      <div className="meeting-main-content">
+        <div className="video-section">
+          {deepfakeAlerts.length > 0 && (
+            <div className="alerts-container">
+              {deepfakeAlerts.map(alert => (
+                <DeepfakeAlert key={alert.id} alert={alert} />
+              ))}
+            </div>
+          )}
+
+          <VideoGrid
+            localStream={localStream}
+            localVideoRef={localVideoRef}
+            participants={participants}
+            userName={user.name}
+            isVideoEnabled={isVideoEnabled}
+          />
+
+          <MeetingControls
+            isVideoEnabled={isVideoEnabled}
+            isAudioEnabled={isAudioEnabled}
+            isScreenSharing={isScreenSharing}
+            isChatOpen={isChatOpen}
+            onToggleVideo={toggleVideo}
+            onToggleAudio={toggleAudio}
+            onToggleScreenShare={toggleScreenShare}
+            onToggleChat={() => setIsChatOpen(!isChatOpen)}
+            onLeaveMeeting={leaveMeeting}
+          />
         </div>
-      )}
 
-      <VideoGrid
-        localStream={localStream}
-        localVideoRef={localVideoRef}
-        participants={participants}
-        userName={user.name}
-        isVideoEnabled={isVideoEnabled}
-      />
-
-      <MeetingControls
-        isVideoEnabled={isVideoEnabled}
-        isAudioEnabled={isAudioEnabled}
-        onToggleVideo={toggleVideo}
-        onToggleAudio={toggleAudio}
-        onLeaveMeeting={leaveMeeting}
-      />
+        {isChatOpen && (
+          <ChatPanel 
+            socket={socketRef.current} 
+            meetingId={meetingId} 
+            currentUser={user} 
+          />
+        )}
+      </div>
     </div>
   );
 }
