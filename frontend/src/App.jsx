@@ -26,11 +26,19 @@ function App() {
   }, []);
 
   const handleLogin = (userData) => {
-    setUser(userData.user);
+    // Save token
     if (userData.token) {
       localStorage.setItem('token', userData.token);
     }
-    localStorage.setItem('user', JSON.stringify(userData.user));
+
+    // Remove token before storing user
+    const { token, ...userWithoutToken } = userData;
+
+    // Save user properly
+    localStorage.setItem('user', JSON.stringify(userWithoutToken));
+
+    // Update state
+    setUser(userWithoutToken);
   };
 
   const handleLogout = () => {

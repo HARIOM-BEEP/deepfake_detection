@@ -1,18 +1,17 @@
+import dotenv from "dotenv";
+dotenv.config();
+console.log("Google ID:", process.env.GOOGLE_CLIENT_ID);
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import session from 'express-session';
 import passport from 'passport';
 import connectDB from './config/db.js';
 import authRoutes from './routes/auth.js';
 import meetingRoutes from './routes/meetings.js';
-import googleAuthRoutes from './routes/googleAuth.js';
+// import googleAuthRoutes from './routes/googleAuth.js';
 import meetingHandler from './sockets/meetingHandler.js';
-
-// Load environment variables
-dotenv.config();
 
 // Connect to database
 connectDB();
@@ -24,19 +23,15 @@ const httpServer = createServer(app);
 // Initialize Socket.io
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' 
-      ? 'https://your-production-domain.com' 
-      : 'http://localhost:5173',
-    methods: ['GET', 'POST'],
-    credentials: true
-  }
+  origin: true,
+  methods: ['GET', 'POST'],
+  credentials: true
+}
 });
 
 // Middleware
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? 'https://your-production-domain.com' 
-    : 'http://localhost:5173',
+  origin: true,
   credentials: true
 }));
 app.use(express.json({ limit: '50mb' }));
@@ -59,7 +54,7 @@ app.use(passport.session());
 
 // Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/auth', googleAuthRoutes);
+// app.use('/api/auth', googleAuthRoutes);
 app.use('/api/meetings', meetingRoutes);
 
 // Health check
