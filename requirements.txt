@@ -1,0 +1,9 @@
+# Core Dependencies
+
+numpy
+scikit-learn
+pandas
+opencv-python
+tensorflow
+keras
+flask
