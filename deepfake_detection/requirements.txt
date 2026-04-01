@@ -1,0 +1,16 @@
+# Core Dependencies
+
+numpy
+pandas
+matplotlib
+seaborn
+scipy
+scikit-learn
+joblib
+opencv-python
+mediapipe
+torch
+torchvision
+ultralytics
+xgboost
+flask
