@@ -5,7 +5,8 @@ The tracker combines periodic YOLO face detection with lightweight OpenCV
 single-object trackers between detections. Each feature extractor keeps its own
 per-track analysis state on top of these common helpers.
 """
-
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -44,14 +45,32 @@ class MultiFaceTracker:
     def __init__(self, model_filename: str = "yolov8n-face-lindevs.pt"):
         self.device = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
         self.yolo = None
+        self.face_cascade = None
+        self.detector_backend = "none"
 
         model_path = Path(__file__).with_name(model_filename)
         if YOLO is not None and model_path.exists():
-            self.yolo = YOLO(str(model_path))
             try:
-                self.yolo.to(self.device)
+                self.yolo = YOLO(str(model_path))
+                try:
+                    self.yolo.to(self.device)
+                except Exception:
+                    pass
+                self.detector_backend = "yolo"
             except Exception:
-                pass
+                self.yolo = None
+
+        if self.yolo is None:
+            try:
+                cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+            except Exception:
+                cascade_path = None
+
+            if cascade_path is not None and cascade_path.exists():
+                cascade = cv2.CascadeClassifier(str(cascade_path))
+                if not cascade.empty():
+                    self.face_cascade = cascade
+                    self.detector_backend = "haar"
 
     @staticmethod
     def _expand_bbox(
@@ -350,7 +369,38 @@ class MultiFaceTracker:
 
     def _detect_faces(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         if self.yolo is None:
-            return []
+            if self.face_cascade is None:
+                return []
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray)
+            faces = self.face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=5,
+                minSize=(36, 36),
+            )
+
+            detections = []
+            for x, y, w, h in faces:
+                bbox = (
+                    int(x),
+                    int(y),
+                    int(x + w),
+                    int(y + h),
+                )
+                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                    continue
+
+                area = max(0, w) * max(0, h)
+                detections.append({
+                    "bbox": bbox,
+                    "confidence": 1.0,
+                    "score": float(area),
+                })
+
+            detections.sort(key=lambda item: item["score"], reverse=True)
+            return detections
 
         try:
             results = self.yolo(frame, conf=self.YOLO_CONFIDENCE, verbose=False)

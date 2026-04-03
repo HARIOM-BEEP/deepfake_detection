@@ -12,7 +12,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-from deepfake_detection.deepfake_project.feature_extraction.face_tracking import MultiFaceTracker
+from face_tracking import MultiFaceTracker
 
 warnings.filterwarnings("ignore")
 
@@ -368,15 +368,8 @@ class RobustHeadPoseEstimator(MultiFaceTracker):
     ) -> Dict[str, float]:
         if len(angles_list) < 2:
             return {
-                "mean_yaw": 0.0,
                 "yaw_variance": 0.0,
-                "mean_pitch": 0.0,
                 "pitch_variance": 0.0,
-                "mean_roll": 0.0,
-                "roll_variance": 0.0,
-                "yaw_angular_velocity": 0.0,
-                "pitch_angular_velocity": 0.0,
-                "roll_angular_velocity": 0.0
             }
 
         clean_angles = self._remove_outliers_mad(angles_list)
@@ -385,43 +378,16 @@ class RobustHeadPoseEstimator(MultiFaceTracker):
 
         yaw_angles = np.array([a[0] for a in clean_angles], dtype=np.float64)
         pitch_angles = np.array([a[1] for a in clean_angles], dtype=np.float64)
-        roll_angles = np.array([a[2] for a in clean_angles], dtype=np.float64)
 
         mean_yaw = self._weighted_circular_average(list(yaw_angles))
         mean_pitch = float(np.mean(pitch_angles))
-        mean_roll = self._weighted_circular_average(list(roll_angles))
 
         yaw_diffs = np.array([self._angle_difference(mean_yaw, angle) for angle in yaw_angles], dtype=np.float64)
         pitch_diffs = pitch_angles - mean_pitch
-        roll_diffs = np.array([self._angle_difference(mean_roll, angle) for angle in roll_angles], dtype=np.float64)
-
-        effective_fps = fps / frame_skip if fps > 0 else 15.0
-        time_delta = 1.0 / effective_fps if effective_fps > 0 else 1.0 / 15.0
-
-        yaw_velocities = []
-        pitch_velocities = []
-        roll_velocities = []
-        for index in range(1, len(clean_angles)):
-            yaw_diff = self._angle_difference(clean_angles[index - 1][0], clean_angles[index][0])
-            pitch_diff = clean_angles[index][1] - clean_angles[index - 1][1]
-            roll_diff = self._angle_difference(clean_angles[index - 1][2], clean_angles[index][2])
-            if abs(yaw_diff) <= self.MAX_YAW_JUMP_THRESHOLD:
-                yaw_velocities.append(abs(yaw_diff) / time_delta)
-            if abs(pitch_diff) <= self.MAX_PITCH_JUMP_THRESHOLD:
-                pitch_velocities.append(abs(pitch_diff) / time_delta)
-            if abs(roll_diff) <= self.MAX_ROLL_JUMP_THRESHOLD:
-                roll_velocities.append(abs(roll_diff) / time_delta)
 
         return {
-            "mean_yaw": float(mean_yaw),
             "yaw_variance": float(np.var(yaw_diffs)),
-            "mean_pitch": mean_pitch,
             "pitch_variance": float(np.var(pitch_diffs)),
-            "mean_roll": float(mean_roll),
-            "roll_variance": float(np.var(roll_diffs)),
-            "yaw_angular_velocity": float(np.mean(yaw_velocities)) if yaw_velocities else 0.0,
-            "pitch_angular_velocity": float(np.mean(pitch_velocities)) if pitch_velocities else 0.0,
-            "roll_angular_velocity": float(np.mean(roll_velocities)) if roll_velocities else 0.0
         }
 
     def _extract_pose_from_face(
@@ -487,21 +453,8 @@ class RobustHeadPoseEstimator(MultiFaceTracker):
     @staticmethod
     def _default_result(video_path: Path) -> Dict[str, Any]:
         return {
-            "video_path": video_path.name,
-            "yaw_variance": -1.0,
-            "pitch_variance": -1.0,
-            "roll_variance": -1.0,
-            "yaw_angular_velocity": -1.0,
-            "pitch_angular_velocity": -1.0,
-            "roll_angular_velocity": -1.0,
-            "mean_yaw": -1.0,
-            "mean_pitch": -1.0,
-            "mean_roll": -1.0,
-            "duration": 0.0,
-            "frames_processed": 0,
-            "faces_detected": 0,
-            "primary_track_id": -1,
-            "face_summaries": []
+            "yaw_variance": float(np.nan),
+            "pitch_variance": float(np.nan),
         }
 
     def _create_track(self, track_id: int, bbox: Tuple[int, int, int, int], frame: np.ndarray) -> Dict[str, Any]:
@@ -536,12 +489,9 @@ class RobustHeadPoseEstimator(MultiFaceTracker):
         return {
             "track_id": track["track_id"],
             "frames_processed": track["frames_processed"],
-            "observed_face_frames": int(track.get("observed_face_frames", 0)),
-            "frontal_face_frames": int(track.get("frontal_face_frames", 0)),
-            "frontal_face_ratio": self._track_frontality_ratio(track),
+            "primary_score": primary_score,
             "avg_face_area_ratio": avg_area_ratio,
             "avg_center_proximity": avg_center_proximity,
-            "primary_score": primary_score,
             **stats
         }
 
@@ -605,7 +555,6 @@ class RobustHeadPoseEstimator(MultiFaceTracker):
                 cap.release()
                 return result
 
-            result["duration"] = frame_count / fps
             skip_options = [self.frame_skip]
             if self.frame_skip != 1:
                 skip_options.append(1)
@@ -623,15 +572,21 @@ class RobustHeadPoseEstimator(MultiFaceTracker):
                 summary_track_min_frames = max(8, int(np.ceil(0.015 * frame_count / current_skip)))
                 lost_face_reset_frames = max(1, int(np.ceil(self.LOST_FACE_RESET_SEC * fps / current_skip)))
 
+                frame_counter = 0
+                max_frames = int(fps * 6) 
+                
                 while True:
                     ret, frame = cap.read()
                     if not ret:
                         break
 
                     frame_idx += 1
+                    frame_counter += 1
+                    if frame_counter > max_frames:
+                        break
                     if frame_idx % current_skip != 0:
                         continue
-
+                    
                     processed_frame_idx += 1
                     run_detection = (
                         processed_frame_idx == 1
@@ -786,17 +741,6 @@ class RobustHeadPoseEstimator(MultiFaceTracker):
                 final_result = {
                     "yaw_variance": primary_face["yaw_variance"],
                     "pitch_variance": primary_face["pitch_variance"],
-                    "roll_variance": primary_face["roll_variance"],
-                    "yaw_angular_velocity": primary_face["yaw_angular_velocity"],
-                    "pitch_angular_velocity": primary_face["pitch_angular_velocity"],
-                    "roll_angular_velocity": primary_face["roll_angular_velocity"],
-                    "mean_yaw": primary_face["mean_yaw"],
-                    "mean_pitch": primary_face["mean_pitch"],
-                    "mean_roll": primary_face["mean_roll"],
-                    "frames_processed": primary_face["frames_processed"],
-                    "faces_detected": len(face_summaries),
-                    "primary_track_id": primary_face["track_id"],
-                    "face_summaries": face_summaries
                 }
                 break
 
