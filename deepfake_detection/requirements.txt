@@ -8,7 +8,7 @@ scipy
 scikit-learn
 joblib
 opencv-python
-mediapipe
+mediapipe==0.10.9
 torch
 torchvision
 ultralytics

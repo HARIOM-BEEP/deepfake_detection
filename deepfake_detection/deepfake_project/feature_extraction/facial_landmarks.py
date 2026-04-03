@@ -1,4 +1,4 @@
-﻿﻿"""
+"""
 Tracked facial landmark extraction â€” improved for maximum accuracy.
 
 Improvements over the original
@@ -58,7 +58,7 @@ Improvements over the original
      landmark_jitter        â€” mean |Î”Â²position| (second derivative):
                               deepfakes show either flat-zero or unusually
                               high jitter from rendering artefacts.
-     face_symmetry_score    â€” 0â€“1; how symmetric visible landmarks are
+     face_symmetry_mean     â€” 0â€“1; how symmetric visible landmarks are
                               about the estimated midplane. Real faces â‰ˆ 0.88.
                               Some deepfake generators break symmetry.
      frontal_face_ratio     â€” fraction of frames that were frontal.
@@ -115,7 +115,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-from deepfake_detection.deepfake_project.feature_extraction.face_tracking import MultiFaceTracker
+from face_tracking import MultiFaceTracker
 
 warnings.filterwarnings("ignore")
 
@@ -860,7 +860,7 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
             "overlay_groups":    overlay_groups,
             "stable_points":     stable_pts,      # RAW â€” caller must not smooth before feature use
             "all_points":        pts.astype(np.float32) if self.draw_all_points else None,
-            "face_symmetry":     sym_score,
+            "face_symmetry_mean": sym_score,
             "landmark_quality":  frontality["landmark_quality"],
             "front_facing":      bool(frontality["front_facing"]),
             "pose_yaw":          float(frontality["pose_yaw"]),
@@ -875,15 +875,8 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
     @staticmethod
     def _default_result(vp: Path) -> Dict[str, Any]:
         return {
-            "video_path":             vp.name,
-            "landmark_jitter":        -1.0,
-            "face_symmetry_mean":     -1.0,
-            "face_symmetry_variance": -1.0,
-            "duration":               0.0,
-            "frames_processed":       0,
-            "faces_detected":         0,
-            "primary_track_id":       -1,
-            "face_summaries":         [],
+            "landmark_jitter":    float(np.nan),
+            "face_symmetry_mean": float(np.nan),
         }
 
     def _create_track(
@@ -975,12 +968,6 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
         track: Dict[str, Any],
         sample_step: int = 1,
     ) -> Dict[str, Any]:
-
-        def _var(vals: list) -> float:
-            if len(vals) < 2:
-                return 0.0
-            return float(np.var(vals))
-
         sym_s     = track["face_symmetry_samples"]
 
 
@@ -1007,17 +994,13 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
         ps = float(n * (0.40 + ar) * (0.55 + 0.45 * cp)) if n > 0 else 0.0
 
         return {
-            "track_id":                 track["track_id"],
-            "frames_processed":         n,
-            "observed_face_frames":     int(track.get("observed_face_frames", 0)),
-            "frontal_face_frames":      int(track.get("frontal_face_frames", 0)),
-            "frontal_face_ratio":       self._track_frontality_ratio(track),
-            "face_symmetry_mean":       float(np.mean(sym_s)) if sym_s else 0.0,
-            "face_symmetry_variance":   _var(sym_s),
-            "landmark_jitter":          jitter,
-            "avg_face_area_ratio":      ar,
-            "avg_center_proximity":     cp,
-            "primary_score":            ps,
+            "track_id":             track["track_id"],
+            "frames_processed":     n,
+            "face_symmetry_mean":   float(np.mean(sym_s)) if sym_s else 0.0,
+            "landmark_jitter":      jitter,
+            "avg_face_area_ratio":  ar,
+            "avg_center_proximity": cp,
+            "primary_score":        ps,
         }
 
     # =========================================================================
@@ -1097,8 +1080,6 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
                 cap.release()
                 return result
 
-            result["duration"] = fc / fps
-
             if output_path is not None:
                 output_path = Path(output_path)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1129,12 +1110,18 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
                 sum_min_frames     = max(6,  int(np.ceil(0.015 * fc / current_skip)))
                 lost_reset_frames  = max(1,  int(np.ceil(self.LOST_FACE_RESET_SEC * fps / current_skip)))
 
+                frame_counter = 0
+                max_frames = int(min(fc, fps * 6))
                 while True:
                     ret, frame = cap.read()
                     if not ret:
                         break
 
                     fi += 1
+                    frame_counter += 1
+                    if frame_counter > max_frames:
+                        break
+                    
                     if fi % current_skip != 0:
                         if display or writer is not None:
                             if writer:
@@ -1304,7 +1291,7 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
                         # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
                         quality = float(analysis["landmark_quality"])
 
-                        t["face_symmetry_samples"].append(analysis["face_symmetry"])
+                        t["face_symmetry_samples"].append(analysis["face_symmetry_mean"])
                         # Raw pose values â€” _assess_frontality returns the
                         # unsmoothed yaw/pitch directly from the face basis.
 
@@ -1319,7 +1306,7 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
 
                         # HUD scalars (raw values so the overlay is informative)
                         t["last_motion"]         = motion
-                        t["last_face_symmetry"]  = analysis["face_symmetry"]
+                        t["last_face_symmetry"]  = analysis["face_symmetry_mean"]
                         t["last_yaw"]            = analysis["pose_yaw"]
                         t["last_pitch"]          = analysis["pose_pitch"]
                         t["last_quality"]        = quality
@@ -1377,13 +1364,8 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
                     pf = summaries[0]
                     if pf["frames_processed"] >= min_track_frames:
                         final_result = {
-                            "landmark_jitter":        pf["landmark_jitter"],
-                            "face_symmetry_mean":     pf["face_symmetry_mean"],
-                            "face_symmetry_variance": pf["face_symmetry_variance"],
-                            "frames_processed":       pf["frames_processed"],
-                            "faces_detected":         len(summaries),
-                            "primary_track_id":       pf["track_id"],
-                            "face_summaries":         summaries,
+                            "landmark_jitter": pf["landmark_jitter"],
+                            "face_symmetry_mean": pf["face_symmetry_mean"],
                         }
                         break
 
@@ -1423,24 +1405,12 @@ class RobustFacialLandmarkExtractor(MultiFaceTracker):
             raise ValueError("Provide a video_path.")
         tp     = Path(video_path)
         result = self.process_video(tp, display=display, output_path=output_path)
-        pf     = (result.get("face_summaries") or [{}])[0]
 
         print("\n" + "=" * 14 + " LANDMARK RESULTS " + "=" * 14)
         print(f"  Video              : {tp.name}")
-        print(f"  Duration           : {result['duration']:.1f}s")
-        print(f"  Faces tracked      : {result['faces_detected']}")
-        print(f"  Primary face ID    : {result.get('primary_track_id', -1)}")
-        print(f"  Frames processed   : {result['frames_processed']}")
         print("-" * 46)
         print(f"  Landmark jitter    : {result['landmark_jitter']:.5f}")
         print(f"  Face symmetry mean : {result['face_symmetry_mean']:.4f}")
-        print(f"  Face symmetry var  : {result['face_symmetry_variance']:.6f}")
-        if pf:
-            print("-" * 46)
-            print(f"  Frontal ratio      : {pf.get('frontal_face_ratio', 0):.2f}")
-            print(f"  Landmark jitter    : {pf.get('landmark_jitter', 0):.5f}")
-            print(f"  Face symmetry mean : {pf.get('face_symmetry_mean', 0):.4f}")
-            print(f"  Face symmetry var  : {pf.get('face_symmetry_variance', 0):.6f}")
         print("=" * 46)
         return result
 

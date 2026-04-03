@@ -224,27 +224,12 @@ def compute_deepfake_features(
     times      = [t for _, t in timestamps]
     intervals  = [times[i] - times[i-1] for i in range(1, len(times))]
 
-    if len(intervals) >= 2:
-        ia      = np.array(intervals)
-        iv_cv   = float(ia.std() / max(ia.mean(), 1e-6))
-    elif len(intervals) == 1:
-        iv_cv = 0.0
-    else:
-        iv_cv = 0.0
+    if len(intervals) < 2:
+        return {"interval_cv": 0.0}
 
-    # Longest gap without a blink
-    gaps = []
-    if times:
-        gaps.append(times[0])
-        for i in range(1, len(times)):
-            gaps.append(times[i] - times[i-1])
-        gaps.append(duration_sec - times[-1])
-    longest_gap = float(max(gaps)) if gaps else duration_sec
-
-    return {
-        "interval_cv":        round(iv_cv,       3),
-        "longest_gap_sec":    round(longest_gap, 2),
-    }
+    ia = np.array(intervals)
+    iv_cv = float(ia.std() / max(ia.mean(), 1e-6))
+    return {"interval_cv": round(iv_cv, 3)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1159,25 +1144,17 @@ class BlinkDetector:
         )
         n = track["n_frames"]
         return {
-            "track_id":            track["id"],
-            "total_blinks":        final,
-            "blink_count_rt":      rt,
-            "blink_count_pp":      pp["blink_count"],
-            "count_method":        method,
-            "blink_rate":          round(rate, 2),
-            "avg_ear":             round(float(np.mean(track["ear_values"])), 4) if track["ear_values"] else 0.0,
-            "ear_variance":        round(float(np.var(track["ear_values"])), 6) if track["ear_values"] else 0.0,
-            "frames_processed":    n,
-            "is_small_eye":        is_se,
-            "baseline_ear":        round(bl_est, 4),
-            "blink_intervals_sec": pp["intervals_sec"],
-            "blink_durations_sec": pp["durations_sec"],
-            "deepfake_features":   df,
-            "avg_area_ratio":      round(track["area_sum"] / max(n, 1), 4),
-            "avg_center_prox":     round(track["prox_sum"] / max(n, 1), 4),
-            "primary_score":       float(n
-                                         * (0.40 + track["area_sum"] / max(n, 1))
-                                         * (0.55 + 0.45 * track["prox_sum"] / max(n, 1))),
+            "track_id":         track["id"],
+            "blink_rate":       round(rate, 2),
+            "interval_cv":      df["interval_cv"],
+            "frames_processed": n,
+            "avg_area_ratio":   round(track["area_sum"] / max(n, 1), 4),
+            "avg_center_prox":  round(track["prox_sum"] / max(n, 1), 4),
+            "primary_score":    float(
+                n
+                * (0.40 + track["area_sum"] / max(n, 1))
+                * (0.55 + 0.45 * track["prox_sum"] / max(n, 1))
+            ),
         }
 
     # =========================================================================
@@ -1219,7 +1196,7 @@ class BlinkDetector:
 
         track: Optional[Dict] = None
         pfi = fi = 0
-
+        frame_count = 0
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -1229,7 +1206,7 @@ class BlinkDetector:
                 continue
             pfi += 1
             t_sec = fi / fps
-
+            
             # CV tracker
             if track is not None:
                 tb = self._update_tracker(track.get("tracker"), frame, fw, fh)
@@ -1237,7 +1214,9 @@ class BlinkDetector:
                     self._set_bbox(track, tb, backend="tracker", reinit=False)
 
             cur_bb = track.get("smooth_bbox", track["bbox"]) if track else None
-
+            frame_count += 1
+            if frame_count > fc:
+                break
             # YOLO detection
             do_det = (
                 self._yolo is not None
@@ -1322,8 +1301,10 @@ class BlinkDetector:
         if track is None or track["n_frames"] < mtf:
             return None
         s = self._summarise(track, dur, fps, skip)
-        return {**s, "faces_detected": 1, "primary_track_id": s["track_id"],
-                "face_summaries": [s]}
+        return {
+            "blink_rate": s["blink_rate"],
+            "interval_cv": s["interval_cv"],
+        }
 
     # =========================================================================
     # Multi-face processing pass
@@ -1345,7 +1326,7 @@ class BlinkDetector:
         all_tracks: Dict[int, Dict] = {}
         nxt = 1
         pfi = fi = 0
-
+        frame_count = 0
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -1355,7 +1336,10 @@ class BlinkDetector:
                 continue
             pfi += 1
             t_sec = fi / fps
-
+            
+            frame_count += 1
+            if frame_count > fc:
+                break
             do_det = (
                 self._yolo is not None
                 and (pfi == 1 or pfi % self.YOLO_INTERVAL == 0 or not active)
@@ -1431,8 +1415,10 @@ class BlinkDetector:
         pf = summaries[0]
         if pf["frames_processed"] < mtf:
             return None
-        return {**pf, "faces_detected": len(summaries),
-                "primary_track_id": pf["track_id"], "face_summaries": summaries}
+        return {
+            "blink_rate": pf["blink_rate"],
+            "interval_cv": pf["interval_cv"],
+        }
 
     # =========================================================================
     # Public API
@@ -1441,69 +1427,58 @@ class BlinkDetector:
     @staticmethod
     def _default_result(vp: Path) -> Dict[str, Any]:
         return {
-            "video_path":          vp.name,
-            "total_blinks":        -1,
-            "blink_rate":          -1.0,
-            "blink_count_rt":      -1,
-            "blink_count_pp":      -1,
-            "count_method":        "none",
-            "avg_ear":             -1.0,
-            "ear_variance":        -1.0,
-            "frames_processed":    0,
-            "faces_detected":      0,
-            "duration":            0.0,
-            "primary_track_id":    -1,
-            "blink_intervals_sec": [],
-            "blink_durations_sec": [],
-            "deepfake_features":   {},
-            "face_summaries":      [],
+            "blink_rate": float(np.nan),
+            "interval_cv": float(np.nan),
         }
 
     def process_video(
         self,
         video_path: Union[str, Path],
-        display:    bool = False,
+        display: bool = False,
     ) -> Dict[str, Any]:
         """
         Process a video file and return a comprehensive blink analysis dict.
-
-        Key output fields
-        ──────────────────
-        total_blinks        best estimate (two-pass reconciled)
-        blink_count_rt      real-time state-machine count (diagnostic)
-        blink_count_pp      offline valley-detection count (diagnostic)
-        blink_durations_sec per-blink duration list
-        blink_intervals_sec inter-blink interval list
-        deepfake_features   dict with interval_cv and longest_gap_sec
-        face_summaries      per-track breakdown (multi-person videos)
         """
-        vp     = Path(video_path)
+
+        vp = Path(video_path)
         result = self._default_result(vp)
-        cap    = None
+        cap = None
+
         try:
             cap = cv2.VideoCapture(str(vp))
+
             fps = cap.get(cv2.CAP_PROP_FPS)
-            fc  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fw  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            fh  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fc = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
             if fps <= 0 or fps > 120:
                 fps = 30.0
             if fc <= 0 or fw <= 0 or fh <= 0:
                 return result
 
-            result["duration"] = fc / fps
+            # 🔥 LIMIT VIDEO LENGTH HERE
+            max_frames = int(min(fc, fps * 6))  # ~6 seconds
+
+            duration = max_frames / fps   # ✅ corrected duration
+
             skip_opts = [self.frame_skip] + ([1] if self.frame_skip != 1 else [])
-            final     = None
+            final = None
 
             for skip in skip_opts:
                 mode = self._probe_mode(cap, skip)
+
                 if mode == "single":
-                    final = self._single_pass(cap, fps, fc, fw, fh,
-                                              result["duration"], skip, display)
+                    final = self._single_pass(
+                        cap, fps, max_frames, fw, fh,
+                        duration, skip, display
+                    )
                 else:
-                    final = self._multi_pass(cap, fps, fc, fw, fh,
-                                             result["duration"], skip, display)
+                    final = self._multi_pass(
+                        cap, fps, max_frames, fw, fh,
+                        duration, skip, display
+                    )
+
                 if final is not None:
                     break
 
@@ -1512,7 +1487,9 @@ class BlinkDetector:
 
         except Exception as exc:
             print(f"  Error processing {vp.name}: {exc}")
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
+
         finally:
             if cap:
                 cap.release()
@@ -1520,8 +1497,7 @@ class BlinkDetector:
                 cv2.destroyAllWindows()
 
         return result
-
-    def process(
+    def _legacy_process_debug(
         self,
         video_path: Optional[Union[str, Path]] = None,
         display:    bool = True,
@@ -1531,13 +1507,11 @@ class BlinkDetector:
         if target is None:
             raise ValueError("Provide a video_path.")
 
-        r  = self.process_video(target, display=display)
-        df = r.get("deepfake_features", {})
+        r = self.process_video(target, display=display)
 
         print("\n" + "═" * 56)
         print(f"  VIDEO    : {target.name}")
-        print(f"  Duration : {r['duration']:.1f}s  |  Frames proc: {r['frames_processed']}")
-        print(f"  Faces    : {r.get('faces_detected',0)}  Primary ID: {r.get('primary_track_id',-1)}")
+        print(f"  Interval CV : {r['interval_cv']:.3f}")
         print("─" * 56)
         print(f"  BLINKS   : {r['total_blinks']:>5}  "
               f"[RT={r['blink_count_rt']}  PP={r['blink_count_pp']}  {r['count_method']}]")
@@ -1569,6 +1543,24 @@ class BlinkDetector:
                       f"rate={s['blink_rate']:.2f}/min  frames={s['frames_processed']}")
         print("═" * 56)
         return r
+
+    def process(
+        self,
+        video_path: Optional[Union[str, Path]] = None,
+        display: bool = True,
+    ) -> Dict[str, Any]:
+        """Interactive entry-point with a compact printed summary."""
+        target = Path(video_path) if video_path else self.video_path
+        if target is None:
+            raise ValueError("Provide a video_path.")
+
+        result = self.process_video(target, display=display)
+        print("\n" + "=" * 56)
+        print(f"  VIDEO       : {target.name}")
+        print(f"  Blink rate  : {result['blink_rate']:.2f} / min")
+        print(f"  Interval CV : {result['interval_cv']:.3f}")
+        print("=" * 56)
+        return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
